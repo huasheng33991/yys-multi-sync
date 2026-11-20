@@ -369,6 +369,17 @@ class Engine:
         self.manual_master = None
         self.notify("[主控] 已恢复自动 (跟随前台窗口)")
 
+    def overlay_master(self):
+        """供 GUI 描边指示用: 当前应标记为主控的窗口 (可为 None)。
+
+        与 _master_hwnd 的差别: 手动模式下即便主控不在前台 (比如正看着
+        同步器界面), 描边也要持续标在那个窗口上。"""
+        if self.master_mode == "manual":
+            h = self.manual_master
+            return h if (h and user32.IsWindow(h)) else None
+        fg = user32.GetForegroundWindow() or 0
+        return int(fg) if fg in self._snapshot() else None
+
     # ---- 消息投递 ----
     def _post(self, hwnd, msg, wparam, lparam):
         return bool(user32.PostMessageW(hwnd, msg, wparam & 0xFFFFFFFF, lparam & 0xFFFFFFFF))

@@ -204,6 +204,24 @@ class App:
                                                    self.refresh_list(False)))
         self.tree.bind("<Button-3>", self._show_menu)
 
+        # 主控描边覆盖层 (点击穿透, 标记当前主控窗口)
+        self.overlay = tk.Toplevel(root)
+        self.overlay.overrideredirect(True)
+        self._ov_key = '#010203'          # 透明键色 (中心挖空区域)
+        self.overlay.configure(bg=self._ov_key)
+        try:
+            self.overlay.attributes('-transparentcolor', self._ov_key)
+            self.overlay.attributes('-topmost', True)
+        except Exception:
+            pass
+        self._ov_canvas = tk.Canvas(self.overlay, highlightthickness=0,
+                                    bd=0, bg='#22c55e')
+        self._ov_canvas.pack(fill='both', expand=True)
+        self.overlay.bind('<Configure>', lambda e: self._ov_redraw())
+        self.overlay.withdraw()
+        self._ov_ct_done = False
+        self.tree.tag_configure('master', background='#dcfce7')
+
         # ── 日志 ──
         lg = ttk.LabelFrame(root, text=" 运行日志 ", padding=(6, 4))
         lg.pack(fill="both", expand=True, padx=10, pady=(4, 8))
@@ -293,7 +311,61 @@ class App:
 
     def _poll_list(self):
         self.refresh_list(False)
+        self._update_overlay()
         self.root.after(1000, self._poll_list)
+
+    # ── 主控描边覆盖层 ──
+    def _ov_redraw(self):
+        try:
+            w, h = self.overlay.winfo_width(), self.overlay.winfo_height()
+            b = 6
+            cv = self._ov_canvas
+            cv.delete('all')
+            cv.create_rectangle(b, b, max(w - b, b), max(h - b, b),
+                                fill=self._ov_key, outline='')
+        except Exception:
+            pass
+
+    def _make_clickthrough(self):
+        """给覆盖层加 WS_EX_LAYERED|TRANSPARENT|NOACTIVATE: 鼠标完全穿透。"""
+        try:
+            hwnd = int(self.overlay.frame(), 16)
+            GWL_EXSTYLE = -20
+            u = user32
+            u.GetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
+            u.GetWindowLongPtrW.restype = ctypes.c_longlong
+            u.SetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_longlong]
+            style = u.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+            style |= 0x00080000 | 0x00000020 | 0x08000000
+            u.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ctypes.c_longlong(style))
+            self._ov_ct_done = True
+        except Exception:
+            pass
+
+    def _update_overlay(self):
+        """把绿色描边盖在当前主控游戏窗口上 (跟随位置与主控变化)。"""
+        try:
+            h = self.engine.overlay_master()
+        except Exception:
+            h = None
+        if not h or not user32.IsWindow(h):
+            try:
+                if self.overlay.state() == 'normal':
+                    self.overlay.withdraw()
+            except Exception:
+                pass
+            return
+        r = get_rect(h)
+        if not r:
+            return
+        b = 6
+        x, y, w, hh = r[0] - b, r[1] - b, (r[2] - r[0]) + 2 * b, (r[3] - r[1]) + 2 * b
+        if self.overlay.state() == 'withdrawn':
+            self.overlay.deiconify()
+            if not self._ov_ct_done:
+                self._make_clickthrough()
+        self.overlay.geometry(f"{w}x{hh}{x:+d}{y:+d}")
+        self._ov_redraw()
 
     # ── 主控指定 ──
     def _selected_hwnd(self):
@@ -430,7 +502,8 @@ class App:
                 if tuple(self.tree.item(key, "values")) != values:
                     self.tree.item(key, values=values)
             else:
-                self.tree.insert("", "end", iid=key, values=values)
+                self.tree.insert("", "end", iid=key, values=values,
+                                 tags=('master',) if role.startswith("★") else ())
 
     def _append_log(self, text):
         self.txt.config(state="normal")
