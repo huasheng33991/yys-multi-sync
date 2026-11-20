@@ -127,6 +127,10 @@ user32.GetAncestor.argtypes = [wt.HWND, wt.UINT]
 user32.GetAncestor.restype = ctypes.c_void_p
 user32.GetParent.argtypes = [wt.HWND]
 user32.GetParent.restype = ctypes.c_void_p
+user32.SetDlgItemTextW.argtypes = [wt.HWND, ctypes.c_int, wt.LPCWSTR]
+user32.SetDlgItemTextW.restype = wt.BOOL
+user32.GetDlgItemTextW.argtypes = [wt.HWND, ctypes.c_int, wt.LPWSTR, ctypes.c_int]
+user32.GetDlgItemTextW.restype = ctypes.c_int
 user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(RECT)]
 user32.ScreenToClient.argtypes = [wt.HWND, ctypes.POINTER(wt.POINT)]
 user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
@@ -608,13 +612,13 @@ class Engine:
         self._hook_thread = None
 
     # ---- 一键多开 (驱动 V5 多开器的沙盘隔离, 不做任何注入) ----
-    def _find_v5_dialog(self, v5_path, timeout=8):
-        """找到 V5 多开器对话框; 没开就启动它 (只启动一次, 之后轮询等待)。"""
+    def _all_v5_dialogs(self, timeout=8):
+        """返回所有可见的 V5 #32770 对话框; 一个都没有时启动 V5 再找。"""
         launched = False
         deadline = time.time() + timeout
-        dlg = None
-        while time.time() < deadline and dlg is None:
-            found = [None]
+
+        def scan():
+            found = []
 
             def cb(hwnd, _):
                 pid = wt.DWORD()
@@ -624,30 +628,41 @@ class Engine:
                     c = ctypes.create_unicode_buffer(64)
                     user32.GetClassNameW(hwnd, c, 64)
                     if c.value == "#32770":
-                        found[0] = int(hwnd)
+                        found.append(int(hwnd))
                 return True
 
             user32.EnumWindows(WNDENUMPROC(cb), 0)
-            dlg = found[0]
-            if dlg:
-                log(f"V5 对话框已找到: {hex(dlg)}")
-                user32.ShowWindow(dlg, 9)  # SW_SHOW
-                user32.SetForegroundWindow(dlg)
-                break
+            return found
+
+        while time.time() < deadline:
+            found = scan()
+            if found:
+                log(f"V5 对话框: {[hex(d) for d in found]}")
+                if len(found) > 1:
+                    # 残留多个 V5 时只保留第一个, 其余关闭 (避免操作错窗口)
+                    for extra in found[1:]:
+                        user32.PostMessageW(extra, 0x0010, 0, 0)  # WM_CLOSE
+                    self.notify(f"[多开] 发现 {len(found)} 个 V5 窗口, 已关闭多余的")
+                    time.sleep(1)
+                    found = scan()
+                if found:
+                    user32.ShowWindow(found[0], 9)
+                    user32.SetForegroundWindow(found[0])
+                    return found[0]
             if not launched:
                 launched = True
-                log(f"启动 V5 多开器: {v5_path}")
+                log("未发现 V5 窗口, 启动 V5 多开器")
                 try:
-                    subprocess.Popen([v5_path], cwd=os.path.dirname(v5_path) or ".",
+                    subprocess.Popen([self._v5_exe],
+                                     cwd=os.path.dirname(self._v5_exe) or ".",
                                      creationflags=subprocess.DETACHED_PROCESS)
                 except Exception as ex:
                     log(f"启动 V5 失败: {ex!r}")
                     self.notify(f"!! 启动 V5 多开器失败: {ex!r}")
                     return None
             time.sleep(0.5)
-        if dlg is None:
-            log("V5 对话框等待超时")
-        return dlg
+        log("V5 对话框等待超时")
+        return None
 
     def _child_by_ctrlid(self, dlg, ctrlid):
         got = [None]
@@ -668,8 +683,19 @@ class Engine:
         以"新进程数 / 新窗口数"双信号判断达标即停手 (进程先于窗口出现,
         所以不会超发; 被吞掉的点击由后续点击自然补上)。
         返回 (实际新增窗口数, 新窗口 hwnd 列表)。"""
+        self._v5_exe = v5_path
         log(f"多开开始: count={count} v5={v5_path} launch={launch_path}")
-        dlg = self._find_v5_dialog(v5_path)
+        # 解压后首次运行: 集成的 v5/config.ini 里 LastPath 是空的, V5 启动
+        # 时会读到空路径并在其自身初始化时覆盖注入 → 先把正确路径写进配置
+        try:
+            v5_cfg = os.path.join(os.path.dirname(v5_path), "config.ini")
+            os.makedirs(os.path.dirname(v5_cfg), exist_ok=True)
+            with open(v5_cfg, "w", encoding="gbk", errors="ignore") as f:
+                f.write("[V5]\nTitle=V5 程序多开器 0.1 Beta\n"
+                        f"LastPath={launch_path}\nurl=www.prayaya.com\nQuery=0\n")
+        except Exception:
+            pass
+        dlg = self._all_v5_dialogs()
         if dlg is None:
             self.notify("!! 未找到 V5 多开器窗口 (检查 V5 路径)")
             return 0, []
@@ -677,18 +703,43 @@ class Engine:
         btn = self._child_by_ctrlid(dlg, 1002)
         log(f"V5 控件: edit={hex(edit) if edit else None} btn={hex(btn) if btn else None}")
         if not edit or not btn:
-            self.notify("!! V5 对话框控件缺失 (期望 ctrlid 1000/1002)")
+            # 可能是不同版本的 V5 (ctrlid 不同), 记录实际控件结构便于适配
+            kids = []
+
+            def kcb(h, _):
+                t = ctypes.create_unicode_buffer(128)
+                user32.GetWindowTextW(h, t, 128)
+                c = ctypes.create_unicode_buffer(64)
+                user32.GetClassNameW(h, c, 64)
+                kids.append(f"{user32.GetDlgCtrlID(h)}:{c.value}:{t.value}")
+                return True
+
+            user32.EnumChildWindows(dlg, WNDENUMPROC(kcb), 0)
+            log(f"V5 控件结构异常: {kids}")
+            self.notify("!! V5 对话框控件缺失 (期望 ctrlid 1000/1002), 详情见日志")
             return 0, []
-        # 路径写进 V5 的路径框, 保证隔离的就是配置的游戏
-        user32.SetDlgItemTextW(dlg, 1000, launch_path)
-        # 同步更新 V5 自己的配置, 手动打开 V5 时路径也一致
-        try:
-            v5_cfg = os.path.join(os.path.dirname(v5_path), "config.ini")
-            with open(v5_cfg, "w", encoding="gbk", errors="ignore") as f:
-                f.write("[V5]\nTitle=V5 程序多开器 0.1 Beta\n"
-                        f"LastPath={launch_path}\nurl=www.prayaya.com\nQuery=0\n")
-        except Exception:
-            pass
+
+        def inject_path():
+            """写入路径 → 停顿观察是否被 V5 自身初始化覆盖 → 读回验证。"""
+            user32.SetDlgItemTextW(dlg, 1000, launch_path)
+            time.sleep(0.4)
+            buf = ctypes.create_unicode_buffer(512)
+            user32.GetDlgItemTextW(dlg, 1000, buf, 512)
+            log(f"V5 路径注入: 期望={launch_path} 读回={buf.value!r}")
+            return buf.value
+
+        # 注入带重试: 首次运行 V5 的初始化可能延迟覆盖写入, 不生效就重写
+        readback = ""
+        for attempt in range(1, 6):
+            readback = inject_path()
+            if readback == launch_path:
+                break
+            self.notify(f"[多开] 路径注入第 {attempt} 次未生效 "
+                        f"(V5 输入框: {readback!r}), 重写...")
+            time.sleep(0.6)
+        if readback != launch_path:
+            self.notify(f"!! 游戏路径注入 V5 失败: V5 输入框实际是 {readback!r}")
+            return 0, []
 
         start_procs = count_game_procs()
         start_windows = set(find_game_windows()[0])
@@ -696,6 +747,7 @@ class Engine:
         max_clicks = count + 4  # 容忍偶发吞点击, 自动补点
         deadline = time.time() + count * 3 + 100
         while clicked < max_clicks and time.time() < deadline:
+            inject_path()  # 每次点击前重写, 防止 V5 自行清空路径
             user32.PostMessageW(btn, 0x00F5, 0, 0)  # BM_CLICK (异步, 同手点)
             clicked += 1
             hwnds, _ = find_game_windows()
