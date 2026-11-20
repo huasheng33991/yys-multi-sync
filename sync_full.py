@@ -26,8 +26,8 @@ import traceback
 TARGET_TITLE_KEY = "阴阳师"       # 窗口标题关键字
 MOVE_THROTTLE_MS = 8              # 鼠标移动转发最小间隔
 RESCAN_INTERVAL_S = 2             # 窗口列表刷新周期
-CLICK_JITTER_PX = 20              # 受控窗口点击随机偏移上限 (像素)
-CLICK_JITTER_INFLUENCE = 1.0      # 偏移聚集度 (参考 assttyys_autojs, 1.0 时 σ≈4px)
+CLICK_JITTER_PX = 10              # 受控窗口点击随机偏移上限 (像素, 0=关闭)
+CLICK_JITTER_INFLUENCE = 1.0      # 偏移聚集度 (1.0 时 σ≈2px, 模拟真人手抖)
 LOG_EVENTS = False                # True 则记录每次点击事件到日志(调试用)
 
 # 打包版 (PyInstaller) 下日志放在 exe 旁边, 而不是解包临时目录
@@ -250,10 +250,9 @@ def has_dblclks(hwnd):
 
 
 def jitter_point(x, y):
-    """受控窗口的拟人点击偏移 (移植 assttyys_autojs getRegionBiasRnd2):
-    以真实点击点为中心的二维正态分布, σ=0.1/influence²×40px (influence=1 时约 4px,
-    绝大多数落在 ±12px 内, 上限 ±20px); 越界则放大方差重试。
-    按下/抬起共用同一偏移点, 保证是一个完整点击。"""
+    """受控窗口的拟人点击偏移 (方案移植 assttyys_autojs getRegionBiasRnd2):
+    以真实点击点为中心的二维正态分布, σ=0.1/influence²×(上限×2)。
+    按下/抬起共用同一偏移点; 双击两下亦共用 (见引擎 _last_jitter)。"""
     half = CLICK_JITTER_PX
     inf = CLICK_JITTER_INFLUENCE
     u = v = 0
@@ -300,6 +299,7 @@ class Engine:
         self._dbl_time = 500
         self._dbl_dx, self._dbl_dy = 4, 4
         self._dblcls_cache = {}
+        self._last_jitter = {}      # MK标志 -> 双击两下共用的偏移 (dx, dy)
         self._kb_hook = None
         self._ms_hook = None
         self._kb_proc = None
@@ -509,8 +509,15 @@ class Engine:
                         sx, sy = scale_point(master_rect, r, x, y)
                         pt = wt.POINT(sx, sy)
                         user32.ScreenToClient(h, ctypes.byref(pt))
-                        # 拟人随机偏移: 每个受控窗口落点略微不同 (按/抬同点)
-                        pt = wt.POINT(*jitter_point(pt.x, pt.y))
+                        # 拟人随机偏移: 每个受控窗口落点略微不同 (按/抬同点);
+                        # 双击两下共用同一偏移, 避免超出系统双击容差被判成单击
+                        if is_dbl and mk in self._last_jitter:
+                            ddx, ddy = self._last_jitter[mk]
+                        else:
+                            jx, jy = jitter_point(pt.x, pt.y)
+                            ddx, ddy = jx - pt.x, jy - pt.y
+                            self._last_jitter[mk] = (ddx, ddy)
+                        pt = wt.POINT(pt.x + ddx, pt.y + ddy)
                         send = dbl_msg if (is_dbl and self._dblcls_cache.get(h, has_dblclks(h))) else wParam
                         self._dblcls_cache[h] = self._dblcls_cache.get(h, has_dblclks(h))
                         if self._post(h, send, wp, pack_point(pt.x, pt.y)):
