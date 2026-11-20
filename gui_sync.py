@@ -310,9 +310,12 @@ class App:
         self.root.after(100, self._poll_queue)
 
     def _poll_list(self):
-        self.refresh_list(False)
-        self._update_overlay()
-        self.root.after(1000, self._poll_list)
+        try:
+            self.refresh_list(False)
+            self._update_overlay()
+        except Exception:
+            log('列表/描边刷新异常:\n' + traceback.format_exc())
+        self.root.after(1000, self._poll_list)  # 务必续链
 
     # ── 主控描边覆盖层 ──
     def _ov_redraw(self):
@@ -360,6 +363,10 @@ class App:
             return
         b = 6
         x, y, w, hh = r[0] - b, r[1] - b, (r[2] - r[0]) + 2 * b, (r[3] - r[1]) + 2 * b
+        if (h, x, y, w, hh) != getattr(self, '_ov_last', None):
+            log(f'描边: 主控={h:#x} 位置=({x},{y}) 尺寸={w}x{hh} '
+                f'模式={self.engine.master_mode}')
+            self._ov_last = (h, x, y, w, hh)
         if self.overlay.state() == 'withdrawn':
             self.overlay.deiconify()
             if not self._ov_ct_done:
@@ -382,6 +389,7 @@ class App:
         if h:
             self.engine.set_manual_master(h)
             self.refresh_list(False)
+            self._update_overlay()
 
     def _show_menu(self, evt):
         row = self.tree.identify_row(evt.y)
@@ -397,6 +405,7 @@ class App:
         if h:
             self.engine.set_manual_master(h)
             self.refresh_list(False)
+            self._update_overlay()
 
     # ── 一键多开 ──
     def multi_open(self):
