@@ -1,0 +1,14 @@
+# 运行产物 / 本机配置（不入库）
+__pycache__/
+*.log
+*.zip
+yys_sync_config.json
+
+# V5 多开器为第三方程序，禁止入库（本地使用时由配置导入）
+v5/
+
+# 打包产物
+build/
+dist/
+# PyInstaller 版本化 spec (构建临时产物)
+阴阳师多开同步器_*.spec
